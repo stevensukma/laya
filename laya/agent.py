@@ -707,6 +707,11 @@ class Agent(HookRegistry):
             else:
                 self.device = torch.device("cpu")
 
+        if self.device.type == "cuda" and self.device.index is None:
+            # PyTorch's unindexed CUDA device follows the current device, whereas
+            # safetensors interprets "cuda" as cuda:0. Pin both to the same GPU.
+            self.device = torch.device("cuda", torch.cuda.current_device())
+
         tok_dir = os.path.join(model_dir, "tokenizer")
         self.tok = _load_tokenizer(tok_dir, self.cfg)
 

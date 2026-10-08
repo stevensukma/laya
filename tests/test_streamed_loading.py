@@ -197,6 +197,23 @@ class StreamedLoadingTests(unittest.TestCase):
                 agent = load(str(self.repos["bert"]), device="cuda")
         self.assertEqual(agent.device, torch.device("cpu"))
 
+    def test_unindexed_and_auto_cuda_use_the_current_gpu(self):
+        for requested in ("cuda", "auto", None):
+            with self.subTest(device=requested):
+                model = build_model(self.cfg, str(self.repos["bert"] / "encoder"), pretrained=False)
+                with patch("torch.cuda.is_available", return_value=True), \
+                        patch("torch.cuda.device_count", return_value=2), \
+                        patch("torch.cuda.current_device", return_value=1), \
+                        patch("torch.cuda.get_device_capability", return_value=(8, 0)), \
+                        patch("laya.agent.build_model", return_value=model) as build, \
+                        patch("laya.agent._load_weights_on_device") as stream, \
+                        patch.object(model, "to", return_value=model), \
+                        patch("safetensors.torch.load_file", side_effect=AssertionError("Full checkpoint read")):
+                    agent = load(str(self.repos["bert"]), device=requested)
+                self.assertEqual(agent.device, torch.device("cuda:1"))
+                self.assertEqual(build.call_args.kwargs["device"], torch.device("cuda:1"))
+                self.assertEqual(stream.call_args.args[3], torch.device("cuda:1"))
+
     def test_router_forwards_cuda_without_an_extra_loading_option(self):
         with patch("laya.agent.Agent") as constructor:
             router = Router(device="cuda", models={"tiny": str(self.repos["bert"])})
@@ -208,7 +225,7 @@ class StreamedLoadingTests(unittest.TestCase):
                 patch("torch.cuda.device_count", return_value=1), \
                 patch("laya.agent.build_model", side_effect=torch.cuda.OutOfMemoryError("test")) as build:
             with self.assertRaises(torch.cuda.OutOfMemoryError):
-                Agent(str(self.repos["bert"]), device="cuda")
+                Agent(str(self.repos["bert"]), device="cuda:0")
         self.assertEqual(build.call_count, 1)
 
     def test_cuda_copy_is_synchronized_before_reading_next_tensor(self):

@@ -410,7 +410,7 @@ BRANCH_TEST = re.compile(r"self\.device\.type == ['\"]([a-z]+)['\"]")
 
 
 def _branch(device):
-    """`Agent.__init__`'s `if/elif self.device.type == "<device>"` branch, statement by statement.
+    """`Agent.__init__`'s AMP policy branch for the device, statement by statement.
 
     Unparsed from the AST, which normalizes indentation, spacing and line breaks: a branch that is
     only reformatted still reads the same, so this cannot fail for a reason that is not a change of
@@ -421,7 +421,11 @@ def _branch(device):
         if isinstance(node, ast.If):
             match = BRANCH_TEST.search(ast.unparse(node.test))
             if match and match.group(1) == device:
-                return "\n".join(ast.unparse(stmt) for stmt in node.body)
+                body = "\n".join(ast.unparse(stmt) for stmt in node.body)
+                # CUDA device resolution and checkpoint loading also branch on
+                # device.type; select the policy that actually sets amp_enabled.
+                if "self.amp_enabled =" in body:
+                    return body
     return ""
 
 
