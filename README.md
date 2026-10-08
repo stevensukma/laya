@@ -641,6 +641,25 @@ router = Router(max_loaded=1)       # memory-constrained host, reloads on every 
 router.unload()                     # free memory
 ```
 
+CUDA agents automatically load checkpoint tensors one at a time to reduce host RAM:
+
+```python
+from laya import load
+
+agent = load("convaiinnovations/laya", device="cuda")
+router = Router(device="cuda")
+```
+
+This allocates the model directly on the resolved device and loads one checkpoint tensor at
+a time, avoiding a full CPU model and CPU weight dictionary. Model weights remain float32;
+the checkpoint format and inference precision are unchanged. Temporary host memory for file
+I/O and tensor transfers is still needed, so this is not GPU Direct Storage or a guarantee
+of fitting a particular pod memory limit. CUDA needs room for the model and one checkpoint
+tensor. Allocation or transfer errors propagate without retrying the load on CPU. Device
+selection and inference keep their existing CPU fallback policy, so check `agent.device` if
+GPU placement is required. CPU and other device types keep their existing loading path;
+this applies to the PyTorch Agent, including agents built by `Router`.
+
 | Deployment Mode | Per-Request Latency | Model Reloads |
 |---|---|---|
 | `Router()` (lazy, `max_loaded=2`) | detection only (<1 ms) on a switch, after each language's first load | 1 the first time a language appears |
