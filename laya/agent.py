@@ -115,6 +115,11 @@ def _fix_tokenizer_config(path: str):
 
 def _verify_compatibility(model: torch.nn.Module, cfg: Dict, weights: Dict[str, torch.Tensor], model_id: str):
     """Verify that the loaded checkpoint weights and config strictly match the expected architecture."""
+    _verify_checkpoint_shapes(model, cfg, {name: tuple(value.shape) for name, value in weights.items()}, model_id)
+
+
+def _verify_checkpoint_shapes(model: torch.nn.Module, cfg: Dict, shapes: Dict[str, tuple], model_id: str):
+    """Check architectural compatibility using metadata without reading tensor data."""
     # 1. Verify required configuration attributes
     required_cfg = ["encoder", "head_layers"]
     missing_cfg = [k for k in required_cfg if k not in cfg]
@@ -127,22 +132,21 @@ def _verify_compatibility(model: torch.nn.Module, cfg: Dict, weights: Dict[str, 
     # 2. Check for required component prefixes
     required_prefixes = ("encoder.", "type_emb.", "scorer.", "act_head.")
     for prefix in required_prefixes:
-        if not any(k.startswith(prefix) for k in weights.keys()):
+        if not any(k.startswith(prefix) for k in shapes):
             raise ValueError(
                 f"Incompatible model weights for {model_id!r}: checkpoint is missing '{prefix}' parameters. "
                 f"Expected an RL Agent decision model with encoder and decision heads."
             )
 
     # 3. Check for parameter shape mismatches
-    model_sd = model.state_dict()
     shape_mismatches = []
     missing_keys = []
 
     for name, param in model.named_parameters():
-        if name not in weights:
+        if name not in shapes:
             missing_keys.append(name)
-        elif tuple(weights[name].shape) != tuple(param.shape):
-            shape_mismatches.append(f"  - {name}: expected {tuple(param.shape)}, found {tuple(weights[name].shape)}")
+        elif shapes[name] != tuple(param.shape):
+            shape_mismatches.append(f"  - {name}: expected {tuple(param.shape)}, found {shapes[name]}")
 
     if shape_mismatches:
         err_details = "\n".join(shape_mismatches[:5])
@@ -158,6 +162,34 @@ def _verify_compatibility(model: torch.nn.Module, cfg: Dict, weights: Dict[str, 
             f"Model weights incomplete for {model_id!r}: missing {len(missing_keys)} parameter tensors "
             f"(e.g. {missing_keys[:3]})."
         )
+
+
+def _load_weights_on_device(model: torch.nn.Module, cfg: Dict, weights_path: str,
+                            device: torch.device, model_id: str):
+    """Copy one checkpoint tensor at a time into an already allocated model."""
+    from safetensors import safe_open
+
+    state = model.state_dict()
+    with safe_open(weights_path, framework="pt", device=str(device)) as checkpoint:
+        shapes = {name: tuple(checkpoint.get_slice(name).get_shape()) for name in checkpoint.keys()}
+        _verify_checkpoint_shapes(model, cfg, shapes, model_id)
+        missing = sorted(state.keys() - shapes.keys())
+        unexpected = sorted(shapes.keys() - state.keys())
+        mismatched = [name for name in state.keys() & shapes.keys() if tuple(state[name].shape) != shapes[name]]
+        if missing or unexpected or mismatched:
+            raise ValueError(
+                f"Model checkpoint mismatch for {model_id!r}: missing keys {missing}, "
+                f"unexpected keys {unexpected}, incompatible shapes {mismatched}."
+            )
+        with torch.no_grad():
+            for name, target in state.items():
+                tensor = checkpoint.get_tensor(name)
+                target.copy_(tensor)
+                if target.device.type == "cuda":
+                    # Finish the transfer before releasing this tensor and reading another.
+                    # This also bounds temporary host staging used by safetensors.
+                    torch.cuda.current_stream(target.device).synchronize()
+                del tensor
 
 
 _TOKENIZERS: Dict[tuple, Any] = {}
@@ -511,6 +543,12 @@ class Agent(HookRegistry):
         It takes precedence over `fast` and `compile`. Omit it to keep those legacy flags.
         For ONNX use `load(backend="onnx")` instead.
 
+        CUDA loading allocates the model on the resolved device and copies checkpoint
+        tensors one at a time, without a full CPU model or CPU state dictionary.
+        This reduces host memory use, while preserving the model's float32 weights.
+        Temporary host staging is still required. Allocation/transfer errors propagate;
+        device selection and inference retain their existing CPU fallback policy.
+
         `revision` optionally pins the Hub download to an explicit commit SHA/branch/tag;
         when omitted, huggingface_hub's normal default and existing offline cache are used.
         `expected_sha256` ({path relative to the checkpoint dir: hexdigest})
@@ -674,14 +712,16 @@ class Agent(HookRegistry):
 
         enc_dir = os.path.join(model_dir, "encoder")
         # build_model skips initialisation of every parameter; the checkpoint supplies them all.
-        self.model = build_model(self.cfg, encoder_dir=enc_dir if os.path.exists(enc_dir) else None,
-                                 pretrained=False)
-
-        # Load weights and verify architectural compatibility
-        weights = load_file(weights_path)
-        _verify_compatibility(self.model, self.cfg, weights, model_id_or_path)
-
-        self.model.load_state_dict(weights, strict=True)
+        if self.device.type == "cuda":
+            self.model = build_model(self.cfg, encoder_dir=enc_dir if os.path.exists(enc_dir) else None,
+                                     pretrained=False, device=self.device)
+            _load_weights_on_device(self.model, self.cfg, weights_path, self.device, model_id_or_path)
+        else:
+            self.model = build_model(self.cfg, encoder_dir=enc_dir if os.path.exists(enc_dir) else None,
+                                     pretrained=False)
+            weights = load_file(weights_path)
+            _verify_compatibility(self.model, self.cfg, weights, model_id_or_path)
+            self.model.load_state_dict(weights, strict=True)
 
         # ModernBERT's reference_compile defaults to "auto" and will torch.compile the encoder.
         # That is a loss for the batch sizes Laya runs (a handful of questions per call) and can
@@ -2112,6 +2152,7 @@ def load(model_id_or_path: str = "convaiinnovations/laya", device: Optional[str]
     `backend` selects "auto", "eager", "compile", "tilelang" or "onnx". ONNX returns
     the existing `ONNXAgent`, with `onnx_path` (default "laya.onnx").
     Other backends use `Agent`; an explicit backend takes precedence over the legacy flags.
+    CUDA agents stream checkpoint tensors onto the resolved device; see `Agent`.
 
     `revision`/`expected_sha256` pin and verify the downloaded artifacts; see `Agent`.
     `hooks` / `on_predict_start` / `on_predict_end` observe or shape every prediction; see

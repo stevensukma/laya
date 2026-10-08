@@ -600,10 +600,11 @@ class DecisionModel(nn.Module):
         if no_init:
             # Only the modules created above are on the meta device; the encoder is already real
             # and may hold non-persistent buffers (RoPE frequencies) that to_empty would wipe.
+            target_device = next(encoder.parameters()).device
             for module in (self.head, self.type_emb, self.scorer, self.act_head):
                 if module is not None:
-                    module.to_empty(device="cpu")
-            self.temperature = torch.empty_like(self.temperature, device="cpu")
+                    module.to_empty(device=target_device)
+            self.temperature = torch.empty_like(self.temperature, device=target_device)
         self.head_checkpointing = False
 
     def forward(self, input_ids, attention_mask, marker_pos, marker_mask, qtype, detach_encoder: bool = False,
@@ -691,13 +692,14 @@ def _no_init_weights():
 
 
 def build_model(cfg: Dict, encoder_dir: Optional[str] = None, pretrained: bool = True,
-                revision: Optional[str] = None) -> DecisionModel:
+                revision: Optional[str] = None, device: Optional[Union[str, torch.device]] = None) -> DecisionModel:
     """Build the decision model described by `cfg`.
 
     With `pretrained=False`, or when `encoder_dir` holds a saved encoder config, nothing is
     downloaded and **no parameter is initialised**: the caller is expected to load a checkpoint
     into the result with `load_state_dict(..., strict=True)` immediately. Skipping initialisation
     keeps `load()` from spending time on, or consuming RNG for, weights it is about to overwrite.
+    `device` optionally allocates the checkpoint model directly on its target device.
     """
     from transformers import AutoConfig, AutoModel
 
@@ -705,15 +707,17 @@ def build_model(cfg: Dict, encoder_dir: Optional[str] = None, pretrained: bool =
     if not pretrained or (encoder_dir and os.path.exists(encoder_dir)):
         ecfg = AutoConfig.from_pretrained(encoder_dir or cfg["encoder"])
         _apply_rope_config(ecfg)
-        with _no_init_weights():
-            enc = AutoModel.from_config(ecfg, attn_implementation="sdpa")
-        return DecisionModel(enc, head_layers, n_act, no_init=True)
+        with torch.device(device) if device is not None else nullcontext():
+            with _no_init_weights():
+                enc = AutoModel.from_config(ecfg, attn_implementation="sdpa")
+            return DecisionModel(enc, head_layers, n_act, no_init=True)
     # Training-time Hub load of the base encoder; allow pinning it like the checkpoints.
     kw = {"attn_implementation": "sdpa"}
     if revision:
         kw["revision"] = revision
     enc = AutoModel.from_pretrained(cfg["encoder"], **kw)
-    return DecisionModel(enc, head_layers, n_act)
+    model = DecisionModel(enc, head_layers, n_act)
+    return model.to(device) if device is not None else model
 
 
 def proper_reward(

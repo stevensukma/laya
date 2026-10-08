@@ -44,6 +44,7 @@ SCRIPT_SUITES = [
     "tests/test_onnx_long.py",
     "tests/test_onnx_sort.py",
     "tests/test_download.py",
+    "tests/test_streamed_loading.py",
     "tests/test_verify_checkpoints.py",
     "tests/test_shortlist.py",
     "tests/test_decision_model.py",

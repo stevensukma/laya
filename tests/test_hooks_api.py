@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import laya  # noqa: E402
 from laya import Agent, BaseHook, PredictContext, PredictHook, Router, load  # noqa: E402
+from laya.common import build_model  # noqa: E402
 from laya.hooks import HOOK_EVENTS, Hook  # noqa: E402
 from laya.onnx_agent import ONNXAgent  # noqa: E402
 from laya.router import _question_schema  # noqa: E402
@@ -79,6 +80,8 @@ for label, fn in (("Agent.__init__", Agent.__init__), ("load", load)):
     check_param(label, fn, "compile_warmup", True)
     check_param(label, fn, "compile_cache", False)
     check_param(label, fn, "compile_mode", "default")
+
+check_param("build_model", build_model, "device", None)
 
 # Router keeps lang_guess and explicit per-model revisions too
 check_param("Router.__init__", Router.__init__, "lang_guess", None)

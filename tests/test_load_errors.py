@@ -475,10 +475,15 @@ check_true("auto/resolves without crashing",
            _auto.device.type in ("cpu", "cuda", "mps", "xpu"), str(_auto.device))
 del _auto
 
+# This test exercises capability selection rather than checkpoint allocation. CUDA
+# construction now happens before .to(), so substitute a loaded model on CPU here.
+_probe_model = load(str(REPO), device="cpu").model
 with warnings.catch_warnings(record=True) as caught, \
         patch("torch.cuda.is_available", return_value=True), \
         patch("torch.cuda.device_count", return_value=1), \
         patch("torch.cuda.get_device_capability", side_effect=RuntimeError("no driver")), \
+        patch("laya.agent.build_model", return_value=_probe_model), \
+        patch("laya.agent._load_weights_on_device"), \
         patch.object(torch.nn.Module, "to", lambda self, *a, **k: self):
     warnings.simplefilter("always")
     _no_probe = load(str(REPO), device="cuda:0")
